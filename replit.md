@@ -1,45 +1,32 @@
-# [Project name]
+# بن خلدون — القائمة
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Arabic-first café menu and staff menu-management app.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- The `artifacts/ibn-khaldoun-menu: web` workflow runs the customer menu.
+- `pnpm --filter @workspace/ibn-khaldoun-menu run typecheck` checks the app.
+- `pnpm run typecheck` checks all workspace packages.
+- `pnpm run build` typechecks and builds workspace packages.
+- Add `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` as environment variables, then restart the web workflow.
+- Run `artifacts/ibn-khaldoun-menu/supabase/schema.sql` in the Supabase SQL Editor.
+- Create and confirm an Auth user in Supabase, then insert that user's ID into `public.admin_users` using the bootstrap query in the app README.
+- Staff access the menu manager by entering `/admin` directly; the customer site has no link to it.
 
-## Stack
-
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+The menu app uses Supabase Auth and the public anon key. RLS and security-definer functions restrict menu changes and image uploads to allowlisted staff. Never expose a `service_role` key in browser code or a `VITE_` variable. The legacy API server and Drizzle package remain scaffolding and are not required by the menu.
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/ibn-khaldoun-menu/src/App.tsx` — Arabic customer menu, ordering flow, and `/admin` route.
+- `artifacts/ibn-khaldoun-menu/src/pages/AdminPanel.tsx` — staff login and menu management.
+- `artifacts/ibn-khaldoun-menu/src/lib/supabase.ts` and `src/lib/admin.ts` — Supabase client and menu/admin operations.
+- `artifacts/ibn-khaldoun-menu/supabase/schema.sql` — Supabase tables, security policies, menu/order functions, storage bucket, and starter menu rows.
+- `artifacts/ibn-khaldoun-menu/README.md` — setup steps and operating notes.
 
-## Architecture decisions
+## Product and operating notes
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
-
-## Product
-
-_Describe the high-level user-facing capabilities of this app once they exist._
-
-## User preferences
-
-_Populate as you build — explicit user instructions worth remembering across sessions._
-
-## Gotchas
-
-_Populate as you build — sharp edges, "always run X before Y" rules._
-
-## Pointers
-
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- QR links can include `?table=12`; otherwise customers enter a table number before submitting.
+- Customer orders and item/price/variant/exclusion snapshots are saved in `public.orders` and `public.order_items`. Order management remains deferred; staff can review orders in the Supabase dashboard.
+- Menu items support core/excludable ingredients and optional variants with price and image overrides.
+- The SQL file seeds six sample dishes and prices. Replace them with the café's real menu before accepting customer orders.
+- `DATABASE_URL` is not needed by the menu app.
