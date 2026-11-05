@@ -4,6 +4,7 @@ import {
   AlertCircle,
   ArrowDown,
   Check,
+  ClipboardList,
   Coffee,
   ImagePlus,
   LoaderCircle,
@@ -15,6 +16,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import AdminOrders from "./AdminOrders";
 import {
   deleteMenuItem,
   getCurrentAdmin,
@@ -71,6 +73,9 @@ function AdminPanel() {
     },
   });
   const [admin, setAdmin] = useState<{ id: string; email: string } | null>(null);
+  const [activeAdminSection, setActiveAdminSection] = useState<"menu" | "orders">(
+    "menu",
+  );
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState("");
   const [items, setItems] = useState<AdminMenuItem[]>([]);
@@ -448,7 +453,7 @@ function AdminPanel() {
       <div className="admin-topbar">
         <div className="admin-brand">
           <span className="admin-brand-mark"><Coffee size={21} /></span>
-          <span>بن خلدون <small>إدارة القائمة</small></span>
+          <span>بن خلدون <small>إدارة المقهى</small></span>
         </div>
         <div className="admin-session">
           <span className="admin-session-email" dir="ltr" data-testid="text-admin-email">{admin.email}</span>
@@ -456,7 +461,30 @@ function AdminPanel() {
         </div>
       </div>
 
-      <section className="admin-content">
+      <nav className="admin-section-nav" role="tablist" aria-label="أقسام لوحة الإدارة">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeAdminSection === "menu"}
+          className={activeAdminSection === "menu" ? "is-active" : ""}
+          onClick={() => setActiveAdminSection("menu")}
+          data-testid="tab-admin-menu"
+        >
+          <Coffee size={16} /> أصناف القائمة
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeAdminSection === "orders"}
+          className={activeAdminSection === "orders" ? "is-active" : ""}
+          onClick={() => setActiveAdminSection("orders")}
+          data-testid="tab-admin-orders"
+        >
+          <ClipboardList size={16} /> الطلبات والطاولات
+        </button>
+      </nav>
+
+      <section className="admin-content" hidden={activeAdminSection !== "menu"}>
         <div className="admin-page-heading">
           <div>
             <span className="admin-eyebrow">لوحة التشغيل <span className="admin-live-dot" /></span>
@@ -517,6 +545,8 @@ function AdminPanel() {
         )}
         <footer className="admin-list-foot"><span className="admin-foot-rule" />إدارة قائمة بن خلدون</footer>
       </section>
+
+      <AdminOrders isActive={activeAdminSection === "orders"} />
 
       {formOpen && (
         <div className="admin-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) setFormOpen(false); }}>

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type { FormEvent } from "react";
 import {
   ArrowDown,
   ArrowLeft,
@@ -13,6 +20,14 @@ import { Route, Switch } from "wouter";
 import AdminPanel from "@/pages/AdminPanel";
 import NotFound from "@/pages/not-found";
 import {
+  cancelSessionOrder,
+  cancelSessionOrderItem,
+  getActiveTableSession,
+  requestBill,
+  requestWaiter,
+  type DiningSession,
+} from "@/lib/orders";
+import {
   fetchMenu,
   isSupabaseConfigured,
   placeOrder,
@@ -21,6 +36,9 @@ import {
   type IngredientOption,
   type OrderReceipt,
 } from "@/lib/supabase";
+import ActiveSessionPanel from "@/components/orders/ActiveSessionPanel";
+import BillModal from "@/components/orders/BillModal";
+import ServiceActions from "@/components/orders/ServiceActions";
 
 type CartEntry = {
   id: string;
@@ -33,6 +51,42 @@ type CartEntry = {
 };
 
 const money = (amount: number) => `${amount.toLocaleString("ar-SY")} ل.س`;
+const LAST_TABLE_NUMBER_KEY = "ben-khaldoun:last-table-number";
+const sessionStorageKey = (tableNumber: string) =>
+  `ben-khaldoun:table-session:${encodeURIComponent(tableNumber)}`;
+
+function readLastTableNumber() {
+  try {
+    return window.localStorage.getItem(LAST_TABLE_NUMBER_KEY)?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function rememberLastTableNumber(tableNumber: string) {
+  try {
+    window.localStorage.setItem(LAST_TABLE_NUMBER_KEY, tableNumber);
+  } catch {
+    // Table entry remains available in the current app state.
+  }
+}
+
+function readStoredSessionId(tableNumber: string) {
+  try {
+    return window.localStorage.getItem(sessionStorageKey(tableNumber));
+  } catch {
+    return null;
+  }
+}
+
+function rememberTableSession(tableNumber: string, sessionId: string) {
+  try {
+    window.localStorage.setItem(LAST_TABLE_NUMBER_KEY, tableNumber);
+    window.localStorage.setItem(sessionStorageKey(tableNumber), sessionId);
+  } catch {
+    // The order is still active in Supabase if local storage is unavailable.
+  }
+}
 
 function CustomerMenu() {
   const queryTable =
@@ -54,15 +108,58 @@ function CustomerMenu() {
   const [cartOpen, setCartOpen] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [placedOrder, setPlacedOrder] = useState<OrderReceipt | null>(null);
-  const [tableNumber, setTableNumber] = useState(queryTable);
+  const [tableNumber, setTableNumber] = useState(
+    () => queryTable || readLastTableNumber(),
+  );
   const [tableError, setTableError] = useState("");
   const [orderError, setOrderError] = useState("");
   const [placingOrder, setPlacingOrder] = useState(false);
+  const [activeSession, setActiveSession] = useState<DiningSession | null>(null);
+  const [sessionLoading, setSessionLoading] = useState(false);
+  const [sessionError, setSessionError] = useState("");
+  const [sessionPanelOpen, setSessionPanelOpen] = useState(false);
+  const [sessionBusyId, setSessionBusyId] = useState<string | null>(null);
+  const [billOpen, setBillOpen] = useState(false);
+  const [billSubmitting, setBillSubmitting] = useState(false);
+  const [billError, setBillError] = useState("");
+  const [waiterCallPending, setWaiterCallPending] = useState(false);
+  const [waiterCallSubmitting, setWaiterCallSubmitting] = useState(false);
+  const [serviceError, setServiceError] = useState("");
+  const [tablePromptOpen, setTablePromptOpen] = useState(false);
+  const [tablePromptValue, setTablePromptValue] = useState("");
+  const [tablePromptError, setTablePromptError] = useState("");
   const [dishes, setDishes] = useState<Dish[]>([]);
   const [menuLoading, setMenuLoading] = useState(isSupabaseConfigured);
   const [menuError, setMenuError] = useState("");
   const menuRequestInFlight = useRef(false);
   const customerMenuMounted = useRef(false);
+
+  const refreshCustomerSession = useCallback(
+    async (
+      table: string,
+      sessionId: string,
+      isCurrent: () => boolean = () => true,
+    ) => {
+      const session = await getActiveTableSession(table, sessionId);
+      if (!isCurrent()) return session;
+      setActiveSession((current) =>
+        JSON.stringify(current) === JSON.stringify(session) ? current : session,
+      );
+      setWaiterCallPending(Boolean(session?.waiterRequested));
+      setSessionError("");
+      if (!session) {
+        try {
+          if (window.localStorage.getItem(sessionStorageKey(table)) === sessionId) {
+            window.localStorage.removeItem(sessionStorageKey(table));
+          }
+        } catch {
+          // The server remains the source of truth when storage is unavailable.
+        }
+      }
+      return session;
+    },
+    [],
+  );
 
   const refreshMenu = useCallback(async (showLoading = false) => {
     if (!isSupabaseConfigured || menuRequestInFlight.current) return;
@@ -123,6 +220,9 @@ function CustomerMenu() {
         setFilterOpen(false);
         setMenuOpen(false);
         setCartOpen(false);
+        setSessionPanelOpen(false);
+        setBillOpen(false);
+        setTablePromptOpen(false);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -161,6 +261,45 @@ function CustomerMenu() {
       window.removeEventListener("focus", refreshMenuSilently);
     };
   }, [refreshMenu]);
+
+  useEffect(() => {
+    const table = tableNumber.trim();
+    const sessionId = table ? readStoredSessionId(table) : null;
+    if (!table || !sessionId || !isSupabaseConfigured) {
+      setActiveSession(null);
+      setSessionLoading(false);
+      setWaiterCallPending(false);
+      return;
+    }
+
+    let active = true;
+    const refreshSession = async (showLoading: boolean) => {
+      if (showLoading) setSessionLoading(true);
+      try {
+        await refreshCustomerSession(table, sessionId, () => active);
+      } catch {
+        if (active && showLoading) {
+          setSessionError("تعذّر تحميل طلبات جلستك. حاول مرة أخرى.");
+        }
+      } finally {
+        if (active && showLoading) setSessionLoading(false);
+      }
+    };
+
+    void refreshSession(true);
+    const interval = window.setInterval(() => void refreshSession(false), 10_000);
+    const onFocus = () => {
+      if (document.visibilityState === "visible") {
+        void refreshSession(false);
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [refreshCustomerSession, tableNumber]);
 
   const openDish = (item: Dish) => {
     setDish(item);
@@ -234,8 +373,13 @@ function CustomerMenu() {
           ),
         })),
       );
+      rememberTableSession(submittedTableNumber, receipt.sessionId);
+      setTableNumber(submittedTableNumber);
       setPlacedOrder(receipt);
       setConfirmed(true);
+      void refreshCustomerSession(submittedTableNumber, receipt.sessionId).catch(
+        () => setSessionError("تم إرسال الطلب، لكن تعذّر تحديث عرض جلستك."),
+      );
     } catch {
       setOrderError(
         "تعذّر إرسال الطلب. تحقق من الاتصال وإعداد القائمة ثم حاول مرة أخرى.",
@@ -251,6 +395,105 @@ function CustomerMenu() {
     setCart([]);
     setPlacedOrder(null);
     setOrderError("");
+  };
+
+  const sendWaiterCall = async (table: string) => {
+    if (waiterCallSubmitting) return;
+    setWaiterCallSubmitting(true);
+    setServiceError("");
+    rememberLastTableNumber(table);
+    try {
+      const sessionId =
+        activeSession?.tableNumber === table ? activeSession.id : null;
+      await requestWaiter(table, sessionId);
+      setWaiterCallPending(true);
+      setTableNumber(table);
+    } catch {
+      setServiceError("تعذّر إرسال طلب حضور العامل. حاول مرة أخرى.");
+    } finally {
+      setWaiterCallSubmitting(false);
+    }
+  };
+
+  const openWaiterCall = () => {
+    setServiceError("");
+    const table = tableNumber.trim();
+    if (!table) {
+      setTablePromptValue("");
+      setTablePromptError("");
+      setTablePromptOpen(true);
+      return;
+    }
+    void sendWaiterCall(table);
+  };
+
+  const confirmTableForWaiter = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const table = tablePromptValue.trim().slice(0, 30);
+    if (!table) {
+      setTablePromptError("أدخل رقم الطاولة لإرسال الطلب.");
+      return;
+    }
+    setTablePromptOpen(false);
+    setTableNumber(table);
+    void sendWaiterCall(table);
+  };
+
+  const submitBillRequest = async (tipAmount: number) => {
+    if (!activeSession || billSubmitting) return;
+    setBillSubmitting(true);
+    setBillError("");
+    try {
+      const result = await requestBill(activeSession.id, tipAmount);
+      setActiveSession((current) =>
+        current?.id === activeSession.id
+          ? {
+              ...current,
+              tipAmount,
+              total: result.billAmount,
+              billRequested: true,
+            }
+          : current,
+      );
+      void refreshCustomerSession(
+        activeSession.tableNumber,
+        activeSession.id,
+      ).catch(() => undefined);
+    } catch {
+      setBillError("تعذّر إرسال طلب الحساب. تحقق من الاتصال وحاول مجدداً.");
+    } finally {
+      setBillSubmitting(false);
+    }
+  };
+
+  const cancelOrderFromSession = async (orderId: string) => {
+    if (!activeSession || sessionBusyId) return;
+    setSessionBusyId(orderId);
+    setSessionError("");
+    try {
+      await cancelSessionOrder(activeSession.id, orderId);
+      await refreshCustomerSession(activeSession.tableNumber, activeSession.id);
+    } catch {
+      setSessionError(
+        "تعذّر إلغاء الطلب. ربما بدأ العامل بتقديم أحد أصنافه.",
+      );
+    } finally {
+      setSessionBusyId(null);
+    }
+  };
+
+  const cancelItemFromSession = async (itemId: string) => {
+    if (!activeSession || sessionBusyId) return;
+    setSessionBusyId(itemId);
+    setSessionError("");
+    try {
+      await cancelSessionOrderItem(activeSession.id, itemId);
+      await refreshCustomerSession(activeSession.tableNumber, activeSession.id);
+    } catch {
+      setSessionError("تعذّر إلغاء الصنف. قد يكون قد قُدّم بالفعل.");
+    } finally {
+      setSessionBusyId(null);
+    }
   };
 
   return (
@@ -288,6 +531,23 @@ function CustomerMenu() {
         >
           أنت على طاولة <b>{tableNumber}</b>
         </div>
+      )}
+
+      <ServiceActions
+        hasSession={Boolean(activeSession)}
+        waiterPending={waiterCallPending || waiterCallSubmitting}
+        billPending={Boolean(activeSession?.billRequested)}
+        onWaiterCall={openWaiterCall}
+        onViewSession={() => setSessionPanelOpen(true)}
+        onOpenBill={() => {
+          setBillError("");
+          setBillOpen(true);
+        }}
+      />
+      {serviceError && (
+        <p className="guest-service-error" role="alert" data-testid="status-service-error">
+          {serviceError}
+        </p>
       )}
 
       <section className="menu-content">
@@ -794,6 +1054,91 @@ function CustomerMenu() {
               </>
             )}
           </aside>
+        </div>
+      )}
+
+      <ActiveSessionPanel
+        isOpen={sessionPanelOpen}
+        session={activeSession}
+        loading={sessionLoading}
+        error={sessionError}
+        busyId={sessionBusyId}
+        onClose={() => setSessionPanelOpen(false)}
+        onCancelOrder={cancelOrderFromSession}
+        onCancelItem={cancelItemFromSession}
+      />
+
+      <BillModal
+        isOpen={billOpen}
+        session={activeSession}
+        isSubmitting={billSubmitting}
+        error={billError}
+        billRequested={Boolean(activeSession?.billRequested)}
+        onClose={() => setBillOpen(false)}
+        onRequestBill={submitBillRequest}
+      />
+
+      {tablePromptOpen && (
+        <div
+          className="guest-table-prompt-overlay"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setTablePromptOpen(false);
+          }}
+        >
+          <section
+            className="guest-table-prompt"
+            dir="rtl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="guest-table-prompt-title"
+            data-testid="dialog-table-number-prompt"
+          >
+            <button
+              type="button"
+              className="close-button"
+              onClick={() => setTablePromptOpen(false)}
+              aria-label="إغلاق"
+              data-testid="button-close-table-prompt"
+            >
+              <X size={18} />
+            </button>
+            <span className="modal-category">خدمة الطاولة</span>
+            <h2 id="guest-table-prompt-title">على أي طاولة تجلس؟</h2>
+            <p>أدخل رقم الطاولة حتى يصل طلب حضور العامل إلى المكان الصحيح.</p>
+            <form onSubmit={confirmTableForWaiter}>
+              <label className="table-field">
+                <span>رقم الطاولة</span>
+                <input
+                  autoFocus
+                  autoComplete="off"
+                  dir="ltr"
+                  maxLength={30}
+                  value={tablePromptValue}
+                  onChange={(event) => {
+                    setTablePromptValue(event.target.value.slice(0, 30));
+                    setTablePromptError("");
+                  }}
+                  aria-invalid={Boolean(tablePromptError)}
+                  data-testid="input-table-prompt"
+                />
+              </label>
+              {tablePromptError && (
+                <p className="field-error" role="alert">
+                  {tablePromptError}
+                </p>
+              )}
+              <button
+                type="submit"
+                className="primary-action"
+                disabled={waiterCallSubmitting}
+                data-testid="button-confirm-table-prompt"
+              >
+                {waiterCallSubmitting ? "جارٍ إرسال الطلب…" : "نادِ العامل"}
+                <ArrowLeft size={17} />
+              </button>
+            </form>
+          </section>
         </div>
       )}
 

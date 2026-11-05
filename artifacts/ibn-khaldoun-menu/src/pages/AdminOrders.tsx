@@ -1,0 +1,233 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { AlertCircle, BellRing, Check, CheckCheck, Clock3, CreditCard, RefreshCw, X } from "lucide-react";
+import {
+  adminCloseDiningSession,
+  adminMarkDiningSessionPaid,
+  adminMarkOrderItemServed,
+  adminMarkOrderServed,
+  adminResolveServiceRequest,
+  loadAdminOrders,
+  type AdminOrdersSnapshot,
+  type AdminServiceRequest,
+  type DiningSession,
+  type SessionOrder,
+  type SessionOrderItem,
+} from "@/lib/orders";
+import "./admin-orders.css";
+
+export type AdminOrdersProps = { isActive: boolean };
+
+const money = (amount: number) => `${amount.toLocaleString("ar-SY")} ل.س`;
+const time = (value: string) => new Intl.DateTimeFormat("ar-SY", { hour: "numeric", minute: "2-digit" }).format(new Date(value));
+const dateTime = (value: string) => new Intl.DateTimeFormat("ar-SY", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }).format(new Date(value));
+
+function elapsed(openedAt: string, closedAt: string | null, now: number) {
+  const seconds = Math.max(0, Math.floor((new Date(closedAt ?? now).getTime() - new Date(openedAt).getTime()) / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  return hours > 0 ? `${hours.toLocaleString("ar-SY")} س ${String(minutes).padStart(2, "0")} د` : `${minutes.toLocaleString("ar-SY")} د ${String(remainder).padStart(2, "0")} ث`;
+}
+
+function playAttentionTone() {
+  try {
+    const AudioContextConstructor = window.AudioContext ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextConstructor) return;
+    const context = new AudioContextConstructor();
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(740, context.currentTime);
+    oscillator.frequency.setValueAtTime(920, context.currentTime + 0.11);
+    gain.gain.setValueAtTime(0.0001, context.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.13, context.currentTime + 0.025);
+    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.31);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start();
+    oscillator.stop(context.currentTime + 0.32);
+    oscillator.onended = () => {
+      void context.close().catch(() => undefined);
+    };
+  } catch {
+    // Audio may be unavailable or blocked until a user gesture.
+  }
+}
+
+function requestLabel(request: AdminServiceRequest) {
+  return request.type === "waiter" ? "طلب حضور العامل" : "طلب الحساب";
+}
+
+function ItemRow({ item, busyId, onServe }: { item: SessionOrderItem; busyId: string | null; onServe(id: string): void }) {
+  return (
+    <div className={`orders-line ${item.status === "served" ? "is-served" : ""} ${item.status === "cancelled" ? "is-cancelled" : ""}`} data-testid={`row-admin-order-item-${item.id}`}>
+      <div className="orders-line-main">
+        <strong>{item.quantity.toLocaleString("ar-SY")} × {item.itemName}</strong>
+        <small>{[item.variantName, item.sugar ? `سكر ${item.sugar}` : null].filter(Boolean).join(" · ") || "بدون خيارات إضافية"}</small>
+        {item.excludedIngredients.length > 0 && <small>بدون {item.excludedIngredients.join("، ")}</small>}
+        {item.servedAt && <small>قُدّم في {time(item.servedAt)}</small>}
+      </div>
+      <div className="orders-line-side">
+        <b>{money(item.total)}</b>
+        {item.status === "pending" ? (
+          <button type="button" className="orders-small-action" disabled={busyId === item.id} onClick={() => onServe(item.id)} data-testid={`button-serve-item-${item.id}`}>{busyId === item.id ? "جارٍ…" : "تم التقديم"}</button>
+        ) : <span className={`orders-item-status ${item.status}`}>{item.status === "served" ? "قُدّم" : "ملغى"}</span>}
+      </div>
+    </div>
+  );
+}
+
+function OrderCard({ order, busyId, runAction }: { order: SessionOrder; busyId: string | null; runAction(id: string, action: () => Promise<void>): void }) {
+  const canServe = order.status === "received" && order.items.some((item) => item.status === "pending");
+  return (
+    <article className="orders-order-card" data-testid={`card-admin-order-${order.id}`}>
+      <header className="orders-order-head">
+        <div><span className={`orders-order-status ${order.status}`}>{order.status === "served" ? "مكتمل" : order.status === "cancelled" ? "ملغى" : "طلب جديد"}</span><time dateTime={order.createdAt}>{dateTime(order.createdAt)}</time></div>
+        {canServe && <button type="button" className="orders-order-serve" disabled={busyId === order.id} onClick={() => runAction(order.id, () => adminMarkOrderServed(order.id))} data-testid={`button-serve-order-${order.id}`}><CheckCheck size={15} />{busyId === order.id ? "جارٍ التحديث…" : "تم تقديم الطلب"}</button>}
+      </header>
+      <div className="orders-lines">{order.items.map((item) => <ItemRow key={item.id} item={item} busyId={busyId} onServe={(id) => runAction(id, () => adminMarkOrderItemServed(id))} />)}</div>
+      <footer className="orders-order-total"><span>مجموع الطلب</span><b>{money(order.total)}</b></footer>
+    </article>
+  );
+}
+
+function SessionCard({ session, now, busyId, runAction }: { session: DiningSession; now: number; busyId: string | null; runAction(id: string, action: () => Promise<void>): void }) {
+  const isClosed = Boolean(session.closedAt);
+  return (
+    <article className={`orders-session-card ${isClosed ? "is-closed" : ""}`} data-testid={`card-dining-session-${session.id}`}>
+      <header className="orders-session-head">
+        <div className="orders-table-stamp"><span>طاولة</span><strong>{session.tableNumber}</strong></div>
+        <div className="orders-session-details">
+          <h2>جلسة الطاولة {session.tableNumber}</h2>
+          <div className="orders-session-meta"><span><Clock3 size={14} /> {elapsed(session.openedAt, session.closedAt, now)}</span><span>بدأت {dateTime(session.openedAt)}</span>{isClosed && <span className="orders-closed-label">أُغلقت {dateTime(session.closedAt!)}</span>}</div>
+        </div>
+        <div className="orders-session-value"><small>المبلغ الحالي</small><strong>{money(session.total)}</strong>{session.tipAmount > 0 && <small>يشمل إكرامية {money(session.tipAmount)}</small>}</div>
+      </header>
+      <div className="orders-session-flags">
+        <span className={session.paidAt ? "is-paid" : "is-unpaid"}>{session.paidAt ? <><Check size={13} /> مدفوع</> : <><CreditCard size={13} /> غير مدفوع</>}</span>
+        {session.waiterRequested && <span className="is-request">طلب عامل</span>}
+        {session.billRequested && <span className="is-request">طلب حساب</span>}
+      </div>
+      <div className="orders-session-orders">
+        {session.orders.length === 0 ? <p className="orders-no-orders">لا توجد طلبات مسجلة في هذه الجلسة.</p> : session.orders.map((order) => <OrderCard key={order.id} order={order} busyId={busyId} runAction={runAction} />)}
+      </div>
+      {(!session.paidAt || !isClosed) && (
+        <footer className="orders-session-actions">
+          {!session.paidAt && <button type="button" className="orders-pay-action" disabled={busyId === session.id} onClick={() => runAction(session.id, () => adminMarkDiningSessionPaid(session.id))} data-testid={`button-mark-session-paid-${session.id}`}><CreditCard size={16} />{busyId === session.id ? "جارٍ التحديث…" : "تسجيل الدفع وإغلاق الجلسة"}</button>}
+          {!isClosed && <button type="button" className="orders-close-action" disabled={busyId === session.id} onClick={() => runAction(session.id, () => adminCloseDiningSession(session.id))} data-testid={`button-close-session-${session.id}`}>إغلاق الجلسة</button>}
+        </footer>
+      )}
+    </article>
+  );
+}
+
+export default function AdminOrders({ isActive }: AdminOrdersProps) {
+  const [snapshot, setSnapshot] = useState<AdminOrdersSnapshot | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [now, setNow] = useState(Date.now());
+  const [alertOpen, setAlertOpen] = useState(false);
+  const mounted = useRef(false);
+  const inFlight = useRef(false);
+  const knownRequestIds = useRef<Set<string> | null>(null);
+
+  const refresh = useCallback(async (initial = false) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    if (initial) setLoading(true);
+    try {
+      const next = await loadAdminOrders();
+      if (!mounted.current) return;
+      const pending = next.requests.filter((request) => request.status === "pending");
+      const currentIds = new Set(pending.map((request) => request.id));
+      if (knownRequestIds.current === null) {
+        knownRequestIds.current = currentIds;
+        if (pending.length) setAlertOpen(true);
+      } else {
+        const newlyObserved = pending.filter((request) => !knownRequestIds.current?.has(request.id));
+        if (newlyObserved.length > 0) {
+          setAlertOpen(true);
+          try { navigator.vibrate?.([180, 90, 180]); } catch { /* vibration is optional */ }
+          playAttentionTone();
+        }
+        knownRequestIds.current = currentIds;
+      }
+      setSnapshot(next);
+      setError("");
+      if (pending.length === 0) setAlertOpen(false);
+    } catch (caught) {
+      if (mounted.current) setError(caught instanceof Error && caught.message ? caught.message : "تعذّر تحميل الطلبات. تحقق من الاتصال ثم أعد المحاولة.");
+    } finally {
+      inFlight.current = false;
+      if (mounted.current) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    mounted.current = true;
+    void refresh(true);
+    const interval = window.setInterval(() => { void refresh(); }, 5000);
+    const clock = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      mounted.current = false;
+      window.clearInterval(interval);
+      window.clearInterval(clock);
+    };
+  }, [refresh]);
+
+  const runAction = async (id: string, action: () => Promise<void>) => {
+    if (busyId) return;
+    setBusyId(id);
+    setError("");
+    try {
+      await action();
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error && caught.message ? caught.message : "تعذّر حفظ التغيير. حاول مرة أخرى.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const resolveRequest = (request: AdminServiceRequest) => runAction(request.id, () => adminResolveServiceRequest(request.id));
+  const pendingRequests = snapshot?.requests.filter((request) => request.status === "pending") ?? [];
+  const openSessions = snapshot?.sessions.filter((session) => !session.closedAt) ?? [];
+  const recentSessions = snapshot?.sessions.filter((session) => Boolean(session.closedAt)) ?? [];
+
+  return (
+    <>
+      <section className="orders-admin" dir="rtl" hidden={!isActive} data-testid="panel-admin-orders" aria-label="طلبات الطاولات">
+        <div className="orders-page-heading">
+          <div><span className="orders-eyebrow"><i /> متابعة الطاولات</span><h1>طلبات وخدمة الطاولات</h1><p>كل ما يحتاج الانتباه الآن، في مكان واحد.</p></div>
+          <div className="orders-live-state"><span className="orders-live-dot" /> تحديث تلقائي كل ٥ ثوانٍ <button type="button" aria-label="تحديث الطلبات الآن" onClick={() => void refresh()} data-testid="button-refresh-orders"><RefreshCw size={15} /> تحديث</button></div>
+        </div>
+        <div className="orders-overview" data-testid="panel-orders-summary">
+          <div><span>جلسات مفتوحة</span><strong data-testid="text-open-session-count">{(openSessions.length).toLocaleString("ar-SY")}</strong></div>
+          <div><span>طلبات تنتظر الانتباه</span><strong className={pendingRequests.length ? "has-pending" : ""} data-testid="text-pending-request-count">{pendingRequests.length.toLocaleString("ar-SY")}</strong></div>
+          <div className="orders-overview-aside">{snapshot ? `آخر تحديث ${time(new Date(now).toISOString())}` : "بانتظار أول تحديث"}</div>
+        </div>
+        {error && <div className="orders-alert" role="alert" data-testid="status-orders-error"><AlertCircle size={17} /><span>{error}</span><button type="button" onClick={() => void refresh(true)} data-testid="button-retry-orders">إعادة المحاولة</button></div>}
+        {loading && !snapshot ? <div className="orders-skeleton-list" role="status" data-testid="status-orders-loading">{[1, 2].map((item) => <div className="orders-skeleton-card" key={item}><i /><div><b /><b /><b /></div></div>)}</div> : (
+          <>
+            <section className="orders-section" aria-labelledby="orders-open-heading">
+              <div className="orders-section-heading"><div><span>الآن</span><h2 id="orders-open-heading">جلسات مفتوحة</h2></div><b>{openSessions.length.toLocaleString("ar-SY")}</b></div>
+              {openSessions.length === 0 ? <div className="orders-empty" data-testid="status-no-open-sessions"><span className="orders-empty-rule" /><h3>الطاولات هادئة الآن</h3><p>ستظهر الجلسات الجديدة هنا فور وصولها.</p></div> : <div className="orders-session-list">{openSessions.map((session) => <SessionCard key={session.id} session={session} now={now} busyId={busyId} runAction={runAction} />)}</div>}
+            </section>
+            {recentSessions.length > 0 && <section className="orders-section orders-recent-section" aria-labelledby="orders-recent-heading"><div className="orders-section-heading"><div><span>آخر ٢٤ ساعة</span><h2 id="orders-recent-heading">جلسات مغلقة</h2></div><b>{recentSessions.length.toLocaleString("ar-SY")}</b></div><div className="orders-session-list">{recentSessions.map((session) => <SessionCard key={session.id} session={session} now={now} busyId={busyId} runAction={runAction} />)}</div></section>}
+            <section className="orders-section orders-requests-section" aria-labelledby="orders-requests-heading">
+              <div className="orders-section-heading"><div><span>متابعة مباشرة</span><h2 id="orders-requests-heading">طلبات الخدمة</h2></div><b>{pendingRequests.length.toLocaleString("ar-SY")}</b></div>
+              {pendingRequests.length === 0 ? <p className="orders-no-requests" data-testid="status-no-service-requests">لا توجد طلبات خدمة معلّقة.</p> : <div className="orders-request-list">{pendingRequests.map((request) => <article className={`orders-request-card ${request.type}`} key={request.id} data-testid={`card-service-request-${request.id}`}><span className="orders-request-mark"><BellRing size={17} /></span><div className="orders-request-copy"><strong>{request.type === "waiter" ? "العامل مطلوب" : "الحساب مطلوب"} · طاولة {request.tableNumber}</strong><small>{request.type === "bill" && request.billAmount !== null ? `حساب مبدئي ${money(request.billAmount)} · ` : ""}وصل {dateTime(request.createdAt)}</small></div><button type="button" className="orders-resolve-action" disabled={busyId === request.id} onClick={() => void resolveRequest(request)} data-testid={`button-resolve-request-${request.id}`}>{busyId === request.id ? "جارٍ…" : "تمت المعالجة"}</button></article>)}</div>}
+            </section>
+          </>
+        )}
+      </section>
+      {alertOpen && pendingRequests.length > 0 && (
+        <aside className="orders-attention" dir="rtl" role="alertdialog" aria-modal="false" aria-labelledby="orders-attention-title" data-testid="dialog-pending-service-alert">
+          <div className="orders-attention-top"><span className="orders-attention-icon"><BellRing size={18} /></span><div><span>تنبيه خدمة</span><h2 id="orders-attention-title">هناك طلب ينتظر</h2></div><button type="button" aria-label="إخفاء التنبيه مؤقتاً" onClick={() => setAlertOpen(false)} data-testid="button-dismiss-service-alert"><X size={17} /></button></div>
+          <div className="orders-attention-list">{pendingRequests.map((request) => <div className="orders-attention-row" key={request.id}><span>طاولة {request.tableNumber}</span><b>{requestLabel(request)}</b><button type="button" disabled={busyId === request.id} onClick={() => void resolveRequest(request)} data-testid={`button-attention-resolve-${request.id}`}>{busyId === request.id ? "جارٍ…" : "تمت المعالجة"}</button></div>)}</div>
+        </aside>
+      )}
+    </>
+  );
+}

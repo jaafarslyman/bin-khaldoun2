@@ -63,6 +63,12 @@
 .admin-session-email { color: var(--admin-muted); font-family: var(--app-font-mono, monospace); font-size: 11px; }
 .admin-quiet-button { min-height: 35px; padding: 0 11px; border-color: var(--admin-line); background: transparent; color: var(--admin-umber); }
 .admin-quiet-button:hover { background: hsl(39 46% 65% / .16); }
+.admin-section-nav { display: flex; gap: 7px; width: min(100% - 50px, 1100px); margin: 19px auto 0; padding-bottom: 9px; border-bottom: 1px solid hsl(30 18% 38% / .17); }
+.admin-section-nav button { display: inline-flex; align-items: center; gap: 8px; min-height: 39px; padding: 0 13px; border: 1px solid transparent; border-radius: 4px; color: hsl(26 13% 44%); background: transparent; cursor: pointer; font: inherit; font-size: 11px; }
+.admin-section-nav button:hover { color: hsl(20 43% 31%); background: hsl(39 46% 65% / .1); }
+.admin-section-nav button.is-active { border-color: hsl(20 43% 31% / .2); color: hsl(20 43% 31%); background: hsl(39 46% 65% / .16); }
+.admin-section-nav button:focus-visible { outline: 2px solid hsl(20 43% 31%); outline-offset: 2px; }
+.admin-content[hidden] { display: none; }
 .admin-content { width: min(100% - 50px, 1100px); margin: 0 auto; padding-top: 51px; }
 .admin-page-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 22px; }
 .admin-page-heading h1 { margin: 3px 0 2px; font-family: var(--app-font-serif, 'Amiri', serif); font-size: clamp(31px, 4vw, 42px); line-height: 1.35; letter-spacing: -.015em; }

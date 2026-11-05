@@ -35,6 +35,8 @@ export type OrderItemInput = {
 export type OrderReceipt = {
   id: string;
   total: number;
+  sessionId: string;
+  sessionTotal: number;
 };
 
 type MenuItemRow = {
@@ -151,13 +153,25 @@ export async function placeOrder(
     throw new Error("The order service returned an invalid response.");
   }
 
-  const result = data as { order_id?: unknown; total?: unknown };
+  const result = data as {
+    order_id?: unknown;
+    session_id?: unknown;
+    order_total?: unknown;
+    session_total?: unknown;
+  };
   if (
     typeof result.order_id !== "string" ||
-    typeof result.total !== "number"
+    typeof result.session_id !== "string" ||
+    typeof result.order_total !== "number" ||
+    typeof result.session_total !== "number"
   ) {
     throw new Error("The order service returned an invalid response.");
   }
 
-  return { id: result.order_id, total: result.total };
+  return {
+    id: result.order_id,
+    total: result.order_total,
+    sessionId: result.session_id,
+    sessionTotal: result.session_total,
+  };
 }
