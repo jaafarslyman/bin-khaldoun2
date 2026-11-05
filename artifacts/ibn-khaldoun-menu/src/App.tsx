@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowLeft,
@@ -61,7 +61,37 @@ function CustomerMenu() {
   const [dishes, setDishes] = useState<Dish[]>([]);
   const [menuLoading, setMenuLoading] = useState(isSupabaseConfigured);
   const [menuError, setMenuError] = useState("");
-  const [menuReload, setMenuReload] = useState(0);
+  const menuRequestInFlight = useRef(false);
+  const customerMenuMounted = useRef(false);
+
+  const refreshMenu = useCallback(async (showLoading = false) => {
+    if (!isSupabaseConfigured || menuRequestInFlight.current) return;
+
+    menuRequestInFlight.current = true;
+    if (showLoading) {
+      setMenuLoading(true);
+      setMenuError("");
+    }
+
+    try {
+      const items = await fetchMenu();
+      if (!customerMenuMounted.current) return;
+
+      setDishes((current) =>
+        JSON.stringify(current) === JSON.stringify(items) ? current : items,
+      );
+      setMenuError("");
+    } catch {
+      if (showLoading && customerMenuMounted.current) {
+        setMenuError("تعذّر تحميل القائمة. تحقق من إعداد Supabase.");
+      }
+    } finally {
+      menuRequestInFlight.current = false;
+      if (showLoading && customerMenuMounted.current) {
+        setMenuLoading(false);
+      }
+    }
+  }, []);
 
   const categories = useMemo(
     () => ["الكل", ...new Set(dishes.map((item) => item.category))],
@@ -100,47 +130,37 @@ function CustomerMenu() {
   }, []);
 
   useEffect(() => {
+    customerMenuMounted.current = true;
+    return () => {
+      customerMenuMounted.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!isSupabaseConfigured) {
       setDishes([]);
       setMenuLoading(false);
       return;
     }
 
-    let active = true;
-    setMenuLoading(true);
-    setMenuError("");
-
-    void fetchMenu()
-      .then((items) => {
-        if (active) setDishes(items);
-      })
-      .catch(() => {
-        if (active) setMenuError("تعذّر تحميل القائمة. تحقق من إعداد Supabase.");
-      })
-      .finally(() => {
-        if (active) setMenuLoading(false);
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [menuReload]);
+    void refreshMenu(true);
+  }, [refreshMenu]);
 
   useEffect(() => {
     if (!isSupabaseConfigured) return;
 
-    const refreshMenu = () => {
+    const refreshMenuSilently = () => {
       if (document.visibilityState === "visible") {
-        setMenuReload((value) => value + 1);
+        void refreshMenu();
       }
     };
-    const interval = window.setInterval(refreshMenu, 60_000);
-    window.addEventListener("focus", refreshMenu);
+    const interval = window.setInterval(refreshMenuSilently, 60_000);
+    window.addEventListener("focus", refreshMenuSilently);
     return () => {
       window.clearInterval(interval);
-      window.removeEventListener("focus", refreshMenu);
+      window.removeEventListener("focus", refreshMenuSilently);
     };
-  }, []);
+  }, [refreshMenu]);
 
   const openDish = (item: Dish) => {
     setDish(item);
@@ -355,7 +375,7 @@ function CustomerMenu() {
             <p>{menuError}</p>
             <button
               className="menu-retry"
-              onClick={() => setMenuReload((value) => value + 1)}
+              onClick={() => void refreshMenu(true)}
               data-testid="button-retry-menu"
             >
               حاول مرة أخرى
