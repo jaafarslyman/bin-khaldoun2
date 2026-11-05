@@ -29,28 +29,37 @@ function elapsed(openedAt: string, closedAt: string | null, now: number) {
   return hours > 0 ? `${hours.toLocaleString("ar-SY")} س ${String(minutes).padStart(2, "0")} د` : `${minutes.toLocaleString("ar-SY")} د ${String(remainder).padStart(2, "0")} ث`;
 }
 
-function playAttentionTone() {
+function playCounterBell(context: AudioContext) {
   try {
-    const AudioContextConstructor = window.AudioContext ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioContextConstructor) return;
-    const context = new AudioContextConstructor();
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    oscillator.type = "sine";
-    oscillator.frequency.setValueAtTime(740, context.currentTime);
-    oscillator.frequency.setValueAtTime(920, context.currentTime + 0.11);
-    gain.gain.setValueAtTime(0.0001, context.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.13, context.currentTime + 0.025);
-    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.31);
-    oscillator.connect(gain);
-    gain.connect(context.destination);
-    oscillator.start();
-    oscillator.stop(context.currentTime + 0.32);
-    oscillator.onended = () => {
-      void context.close().catch(() => undefined);
-    };
+    const master = context.createGain();
+    const startAt = context.currentTime + 0.01;
+    master.gain.setValueAtTime(0.22, startAt);
+    master.connect(context.destination);
+
+    // Inharmonic partials with a long decay give the alert a small counter-bell ring.
+    for (const [frequency, volume, decay] of [
+      [1760, 0.22, 1.25],
+      [2489, 0.13, 1.05],
+      [3510, 0.075, 0.82],
+      [4580, 0.04, 0.62],
+    ]) {
+      const oscillator = context.createOscillator();
+      const partial = context.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(frequency, startAt);
+      partial.gain.setValueAtTime(0.0001, startAt);
+      partial.gain.exponentialRampToValueAtTime(volume, startAt + 0.008);
+      partial.gain.exponentialRampToValueAtTime(0.0001, startAt + decay);
+      oscillator.connect(partial);
+      partial.connect(master);
+      oscillator.start(startAt);
+      oscillator.stop(startAt + decay + 0.03);
+    }
+
+    master.gain.setValueAtTime(0.22, startAt);
+    master.gain.exponentialRampToValueAtTime(0.0001, startAt + 1.3);
   } catch {
-    // Audio may be unavailable or blocked until a user gesture.
+    // Audio may be unavailable in this browser.
   }
 }
 
@@ -131,6 +140,51 @@ export default function AdminOrders({ isActive }: AdminOrdersProps) {
   const mounted = useRef(false);
   const inFlight = useRef(false);
   const knownRequestIds = useRef<Set<string> | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const queuedBellRef = useRef(0);
+
+  const unlockAlertSound = useCallback(() => {
+    try {
+      const AudioContextConstructor = window.AudioContext ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextConstructor) return;
+      const context = audioContextRef.current ?? new AudioContextConstructor();
+      audioContextRef.current = context;
+      if (context.state === "running") {
+        if (queuedBellRef.current > 0) {
+          queuedBellRef.current = 0;
+          playCounterBell(context);
+        }
+        return;
+      }
+      void context.resume().then(() => {
+        if (context.state !== "running" || queuedBellRef.current === 0) return;
+        queuedBellRef.current = 0;
+        playCounterBell(context);
+      }).catch(() => undefined);
+    } catch {
+      // Browser audio is optional; requests still appear in the admin panel.
+    }
+  }, []);
+
+  const ringForServiceRequests = useCallback(() => {
+    const context = audioContextRef.current;
+    if (!context || context.state !== "running") {
+      queuedBellRef.current += 1;
+      return;
+    }
+    playCounterBell(context);
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener("pointerdown", unlockAlertSound);
+    window.addEventListener("keydown", unlockAlertSound);
+    return () => {
+      window.removeEventListener("pointerdown", unlockAlertSound);
+      window.removeEventListener("keydown", unlockAlertSound);
+      void audioContextRef.current?.close().catch(() => undefined);
+      audioContextRef.current = null;
+    };
+  }, [unlockAlertSound]);
 
   const refresh = useCallback(async (initial = false) => {
     if (inFlight.current) return;
@@ -143,13 +197,17 @@ export default function AdminOrders({ isActive }: AdminOrdersProps) {
       const currentIds = new Set(pending.map((request) => request.id));
       if (knownRequestIds.current === null) {
         knownRequestIds.current = currentIds;
-        if (pending.length) setAlertOpen(true);
+        if (pending.length) {
+          setAlertOpen(true);
+          try { navigator.vibrate?.([180, 90, 180]); } catch { /* vibration is optional */ }
+          ringForServiceRequests();
+        }
       } else {
         const newlyObserved = pending.filter((request) => !knownRequestIds.current?.has(request.id));
         if (newlyObserved.length > 0) {
           setAlertOpen(true);
           try { navigator.vibrate?.([180, 90, 180]); } catch { /* vibration is optional */ }
-          playAttentionTone();
+          ringForServiceRequests();
         }
         knownRequestIds.current = currentIds;
       }
@@ -162,7 +220,7 @@ export default function AdminOrders({ isActive }: AdminOrdersProps) {
       inFlight.current = false;
       if (mounted.current) setLoading(false);
     }
-  }, []);
+  }, [ringForServiceRequests]);
 
   useEffect(() => {
     mounted.current = true;
